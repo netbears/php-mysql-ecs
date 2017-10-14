@@ -1,0 +1,1196 @@
+Parameters:
+
+  Ami:
+    Type: String
+    Description: http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI_launch_latest.html
+
+  AsgMaxSize:
+    Type: Number
+    Description: The maximum size of ASG
+    Default: 6
+
+  AsgMinSize:
+    Type: Number
+    Description: The minimum size of ASG
+    Default: 2
+
+  CadvisorImage:
+    Type: String
+    Default: google/cadvisor:latest
+
+  EmailAlerts:
+    Type: String
+    Default: email_for_alerts@domain.com
+
+  InstanceType:
+    Type: String
+    Default: t2.medium
+    AllowedValues:
+    - t2.micro
+    - t2.medium
+    - t2.small
+    - t2.large
+    - m3.medium
+    - m3.large
+    - m3.xlarge
+    - m3.2xlarge
+    - m4.large
+    - m4.xlarge
+    - m4.2xlarge
+    - m4.4xlarge
+    - m4.10xlarge
+    - c4.large
+    - c4.xlarge
+    - c4.2xlarge
+    - c4.4xlarge
+    - c4.8xlarge
+    - c3.large
+    - c3.xlarge
+    - c3.2xlarge
+    - c3.4xlarge
+    - c3.8xlarge
+    - r3.large
+    - r3.xlarge
+    - r3.2xlarge
+    - r3.4xlarge
+    - r3.8xlarge
+    - i2.xlarge
+    - i2.2xlarge
+    - i2.4xlarge
+    - i2.8xlarge
+    - g2.2xlarge
+    - g2.8xlarge
+    - d2.xlarge
+    - d2.2xlarge
+    - d2.4xlarge
+    - d2.8xlarge
+  
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to instances
+
+  MYSQLDATABASE:
+    Type: String
+    Default: wordpress
+
+  MYSQLUSER:
+    Type: String
+    Default: wordpress
+
+  MYSQLPASSWORD:
+    Type: String
+    NoEcho: true
+  
+  NodeExporterImage:
+    Type: String
+    Default: quay.io/prometheus/node-exporter:latest
+
+  PcpImage:
+    Type: String
+    Default: mmitrofan/pcp:latest
+
+  ProdWordpressImage:
+    Type: String
+    Default: wordpress
+
+  UatWordpressImage:
+    Type: String
+    Default: wordpress
+
+  SubnetID1:
+    Type: AWS::EC2::Subnet::Id
+
+  SubnetID2:
+    Type: AWS::EC2::Subnet::Id
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+Resources:
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Sub: ${AWS::StackName}-Sg
+      VpcId: !Ref VpcId
+
+  SgSSHports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'Sg'
+      IpProtocol: tcp
+      FromPort: '22'
+      ToPort: '22'
+      CidrIp: 0.0.0.0/0
+
+  SgAllTrafficports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'Sg'
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !Ref 'Sg'
+
+  SgALBAllTrafficports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'Sg'
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !Ref 'EcsSecurityGroup'
+
+  AlertsTopic: 
+    Type: AWS::SNS::Topic
+    Properties: 
+      Subscription: 
+        - Endpoint: !Ref EmailAlerts
+          Protocol: email
+      TopicName: 
+        Fn::Sub: ${AWS::StackName}-AlertsTopic
+
+  HostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+            - autoscaling.amazonaws.com
+            - ecs-tasks.amazonaws.com
+            - s3.amazonaws.com
+            - cloudformation.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-DescribeAWSPolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - autoscaling:DescribeAutoScalingGroups
+            - autoscaling:CompleteLifecycleAction
+            - cloudformation:DescribeStacks
+            - cloudformation:DescribeStackResources
+            - cloudwatch:GetMetricStatistics
+            - cloudwatch:ListMetrics
+            - ec2:DescribeInstances
+            - ec2:DescribeTags
+            - ec2:DescribeRegions
+            - ec2:DescribeSecurityGroups
+            - ec2:DescribeSpotPriceHistory
+            - ec2:DescribeAvailabilityZones
+            - elasticloadbalancing:DescribeLoadBalancers
+            Resource: "*"
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-LogsPolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: "*"
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-SendMessagesPolicy
+        PolicyDocument:
+          Statement:
+          - Action: sns:Publish
+            Resource:
+              Ref: AlertsTopic
+            Effect: Allow
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-DumpBackupS3
+        PolicyDocument:
+          Statement:
+          - Action: s3:*
+            Resource: !GetAtt MySQLBackup.Arn
+            Effect: Allow
+          - Action: s3:*
+            Resource: !Sub
+              - ${Bucket}/*
+              - { Bucket: !GetAtt MySQLBackup.Arn }
+            Effect: Allow
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-GetCloudformation
+        PolicyDocument:
+          Statement:
+          - Action:
+            - cloudformation:DescribeStacks
+            - cloudformation:DescribeStackEvents
+            - cloudformation:DescribeStackResource
+            - cloudformation:DescribeStackResources
+            - cloudformation:GetTemplate
+            - cloudformation:List*
+            Resource: "*"
+            Effect: Allow
+
+  HostProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - Ref: HostRole
+
+  FileSystemMySQLProd:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+
+  MountTargetMySQLProd1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemMySQLProd
+      SubnetId: !Ref SubnetID1
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  MountTargetMySQLProd2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemMySQLProd
+      SubnetId: !Ref SubnetID2
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  FileSystemMySQLUat:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+
+  MountTargetMySQLUat1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemMySQLUat
+      SubnetId: !Ref SubnetID1
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  MountTargetMySQLUat2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemMySQLUat
+      SubnetId: !Ref SubnetID2
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  FileSystemWPProd:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+
+  MountTargetWPProd1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemWPProd
+      SubnetId: !Ref SubnetID1
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  MountTargetWPProd2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemWPProd
+      SubnetId: !Ref SubnetID2
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  FileSystemWPUat:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+
+  MountTargetWPUat1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemWPUat
+      SubnetId: !Ref SubnetID1
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  MountTargetWPUat2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemWPUat
+      SubnetId: !Ref SubnetID2
+      SecurityGroups: 
+      - !GetAtt Sg.GroupId
+
+  MySQLBackup:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+
+
+  Asg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - !Ref SubnetID1
+      - !Ref SubnetID2
+      NotificationConfiguration:
+        TopicARN:
+          Ref: AlertsTopic
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH
+        - autoscaling:EC2_INSTANCE_TERMINATE
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      HealthCheckGracePeriod: '600'
+      HealthCheckType: EC2
+      LaunchConfigurationName:
+        Ref: Lc
+      MinSize:
+        Ref: AsgMinSize
+      MaxSize:
+        Ref: AsgMaxSize
+      DesiredCapacity:
+        Ref: AsgMinSize
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: EC2ContainerService-${EcsCluster}
+        PropagateAtLaunch: true
+        PropagateAtLaunch: true
+      - Key: Creator
+        Value:
+          Ref: KeyName
+        PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService:
+          Ref: AsgMinSize
+        PauseTime: PT5M
+
+  Lc:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId:
+        Ref: Ami
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvdcy
+        Ebs:
+          VolumeSize: 100
+          VolumeType: gp2
+      InstanceType:
+        Ref: InstanceType
+      IamInstanceProfile:
+        Ref: HostProfile
+      KeyName:
+        Ref: KeyName
+      SecurityGroups:
+      - Ref: Sg
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #cloud-config
+            package_upgrade: true
+            packages:
+            - aws-cli
+            - ntp
+            - nfs-utils
+            - mysql
+            - wget
+            write_files:
+            - path: /etc/cron.d/db-backup
+              content: |
+                0 0 */3 0 0 root mysqldump --add-drop-table -u ${MYSQLUSER} -p${MYSQLPASSWORD} -h $(aws cloudformation describe-stacks --stack-name ${AWS::StackName} --query "Stacks[0].Outputs[?OutputKey=='MySQLProd'] | [0].OutputValue" --output text) wp > /opt/prod.sql
+                30 0 */3 0 0 root mysqldump --add-drop-table -u ${MYSQLUSER} -p${MYSQLPASSWORD} -h $(aws cloudformation describe-stacks --stack-name ${AWS::StackName} --query "Stacks[0].Outputs[?OutputKey=='MySQLUat'] | [0].OutputValue" --output text) wp > /opt/uat.sql
+                0 1 */3 0 0 root aws s3 sync /opt/prod.sql s3://${MySQLBackup}/$(HOSTNAME)/$(date)/prod.sql
+                30 1 */3 0 0 root aws s3 sync /opt/uat.sql s3://${MySQLBackup}/$(HOSTNAME)/$(date)/uat.sql
+              permissions: '0600'
+            - path: /etc/ecs/ecs.config
+              content: |
+                ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","gelf","awslogs"]
+                ECS_CLUSTER=${EcsCluster}
+                ECS_CONTAINER_STOP_TIMEOUT=125s
+                ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=12h
+                ECS_DISABLE_IMAGE_CLEANUP=false
+                ECS_ECS_IMAGE_CLEANUP_INTERVAL=15m
+                ECS_NUM_IMAGES_DELETE_PER_CYCLE=10
+            runcmd:
+            - vgextend docker /dev/xvdcy
+            - lvextend -L+100G /dev/docker/docker-pool
+            - mkdir -p /mnt/mysql_prod
+            - mkdir -p /mnt/mysql_uat
+            - mkdir -p /mnt/wordpress_prod
+            - mkdir -p /mnt/wordpress_uat
+            - mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${FileSystemMySQLProd}.efs.${AWS::Region}.amazonaws.com:/ /mnt/mysql_prod
+            - mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${FileSystemMySQLUat}.efs.${AWS::Region}.amazonaws.com:/ /mnt/mysql_uat
+            - mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${FileSystemWPProd}.efs.${AWS::Region}.amazonaws.com:/ /mnt/wordpress_prod
+            - mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${FileSystemWPUat}.efs.${AWS::Region}.amazonaws.com:/ /mnt/wordpress_uat
+            - echo '${FileSystemMySQLProd}.efs.${AWS::Region}.amazonaws.com:/ /mnt/mysql_prod nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0' | tee -a /etc/fstab
+            - echo '${FileSystemMySQLUat}.efs.${AWS::Region}.amazonaws.com:/ /mnt/mysql_uat nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0' | tee -a /etc/fstab
+            - echo '${FileSystemWPProd}.efs.${AWS::Region}.amazonaws.com:/ /mnt/wordpress_prod nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0' | tee -a /etc/fstab
+            - echo '${FileSystemWPUat}.efs.${AWS::Region}.amazonaws.com:/ /mnt/wordpress_uat nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0' | tee -a /etc/fstab
+            - stop ecs
+            - service docker restart
+            - start ecs
+
+  CpuUtilization:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName:
+        Ref: Asg
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        TargetValue: 70
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+
+  MemoryUtilization:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName:
+        Ref: Asg
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        CustomizedMetricSpecification:
+          MetricName: MemoryUtilization
+          Namespace: AWS/ECS
+          Dimensions:
+          - Name: ClusterName
+            Value:
+              Ref: EcsCluster
+          Statistic: Maximum
+        TargetValue: 80
+
+  NetworkInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: AlertsTopic
+      MetricName: NetworkIn
+      ComparisonOperator: GreaterThanThreshold
+      AlarmDescription: High network input traffic during 15 minutes
+      Statistic: Average
+      Period: '300'
+      Dimensions:
+      - Value:
+          Ref: Asg
+        Name: AutoScalingGroupName
+      EvaluationPeriods: '3'
+      InsufficientDataActions:
+      - Ref: AlertsTopic
+      Namespace: AWS/EC2
+      Threshold: '2400000000'
+
+  RAMAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: AlertsTopic
+      MetricName: MemoryUtilization
+      ComparisonOperator: GreaterThanThreshold
+      AlarmDescription: Memory utilization > 85% during 15 minutes
+      Statistic: Average
+      Period: '300'
+      Dimensions:
+      - Value:
+          Ref: Asg
+        Name: AutoScalingGroupName
+      EvaluationPeriods: '3'
+      InsufficientDataActions:
+      - Ref: AlertsTopic
+      Namespace: System/Linux
+      Threshold: '85'
+
+  NetworkOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: AlertsTopic
+      MetricName: NetworkOut
+      ComparisonOperator: GreaterThanThreshold
+      AlarmDescription: High network output traffic during 15 minutes
+      Statistic: Average
+      Period: '300'
+      Dimensions:
+      - Value:
+          Ref: Asg
+        Name: AutoScalingGroupName
+      EvaluationPeriods: '3'
+      InsufficientDataActions:
+      - Ref: AlertsTopic
+      Namespace: AWS/EC2
+      Threshold: '2400000000'
+
+  IOWaitAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: AlertsTopic
+      MetricName: IOWait
+      ComparisonOperator: GreaterThanThreshold
+      AlarmDescription: Alarm if IOWait > 85% for 15 minutes
+      Statistic: Average
+      Period: '300'
+      Dimensions:
+      - Value:
+          Ref: AWS::StackName
+        Name: StackName
+      EvaluationPeriods: '3'
+      InsufficientDataActions:
+      - Ref: AlertsTopic
+      Namespace: AWS/EC2
+      Threshold: '85'
+
+  StatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: AlertsTopic
+      MetricName: StatusCheckFailed
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmDescription: Alert if asg has degraded instances
+      Statistic: Maximum
+      Period: '60'
+      Dimensions:
+      - Value:
+          Ref: Asg
+        Name: AutoScalingGroupName
+      EvaluationPeriods: '2'
+      InsufficientDataActions:
+      - Ref: AlertsTopic
+      Unit: Count
+      Namespace: AWS/EC2
+      Threshold: '1'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName:
+        Fn::Sub: ${AWS::StackName}-LogGroup
+      RetentionInDays: 14
+
+  ProdWordpressTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+      - Name: wordpress
+        Image:
+          Ref: ProdWordpressImage           
+        Memory: 256
+        PortMappings:
+        - ContainerPort: 80
+        MountPoints:
+        - ContainerPath: /var/www/html/wp-content
+          SourceVolume: data
+        Environment:
+        - Name: WORDPRESS_DB_HOST
+          Value: !GetAtt ECSELBMySQLProd.DNSName
+        - Name: WORDPRESS_DB_USER
+          Value: !Ref MYSQLUSER
+        - Name: WORDPRESS_DB_PASSWORD
+          Value: !Ref MYSQLPASSWORD
+        - Name: WORDPRESS_DB_NAME
+          Value: !Ref MYSQLDATABASE
+        - Name: WORDPRESS_TABLE_PREFIX
+          Value: wp
+        - Name: WORDPRESS_AUTH_KEY
+          Value: '9aaeVk9aKb5mkK452aPa1ragaBPxaAsZMaaIxjaaaDEbthax4ZaaJqRaraBOWaZa'
+        - Name: WORDPRESS_SECURE_AUTH_KEY
+          Value: 'atoHakFXaaamqkbY32uZaaaiaa3J1FanJQQsv97baa2aRaaaaatUaGwfUBa1Lmdp'
+        - Name: WORDPRESS_LOGGED_IN_KEY
+          Value: 'a1aSaaaaybanZwYaaaaaalaRaSdjTHU0FM9OaaNAVIaaaaa6qaa1aajS2Uy2kaEq'
+        - Name: WORDPRESS_NONCE_KEY
+          Value: 'mC8aWvM3a5fadaHaGawsaQiBskaaaraaafPZJQdRaatvQtaOakaaaaQZEaNfafaa'
+        - Name: WORDPRESS_AUTH_SALT
+          Value: 'EaAwWaansaa3a3aa1LQrf2af5cLEaaZqabpG6K2adQaaaRJRaaaa8ACwaKYXaaV]'
+        - Name: WORDPRESS_SECURE_AUTH_SALT
+          Value: 'aauUa7GIpohbabBaza10GalaisfXDaJIa9m43aFCa90lhaxjg3aPaLnnaaaVQaoQ'
+        - Name: WORDPRESS_LOGGED_IN_SALT
+          Value: 'saK94aaaaaa4DyoayGAaaOaKaYQaOaKaXQCQWacpa3uabaqF?7sMaauOdaXaopL2'
+        - Name: WORDPRESS_NONCE_SALT
+          Value: 'qaVq8rOcahaagaaa9AaoRh7d7SYJka2irwatunaaavaaaH6aKa5IJXaJu4laaaq^'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      Volumes:
+      - Name: data
+        Host:
+          SourcePath: /mnt/wordpress_prod
+
+  UatWordpressTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+      - Name: wordpress
+        Image:
+          Ref: UatWordpressImage           
+        Memory: 256
+        PortMappings:
+        - ContainerPort: 80
+        MountPoints:
+        - ContainerPath: /var/www/html/wp-content
+          SourceVolume: data
+        Environment:
+        - Name: WORDPRESS_DB_HOST
+          Value: !GetAtt ECSELBMySQLUat.DNSName
+        - Name: WORDPRESS_DB_USER
+          Value: !Ref MYSQLUSER
+        - Name: WORDPRESS_DB_PASSWORD
+          Value: !Ref MYSQLPASSWORD
+        - Name: WORDPRESS_DB_NAME
+          Value: !Ref MYSQLDATABASE
+        - Name: WORDPRESS_TABLE_PREFIX
+          Value: wp
+        - Name: WORDPRESS_AUTH_KEY
+          Value: '9aaeVk9aKb5mkK452aPa1ragaBPxaAsZMaaIxjaaaDEbthax4ZaaJqRaraBOWaZa'
+        - Name: WORDPRESS_SECURE_AUTH_KEY
+          Value: 'atoHakFXaaamqkbY32uZaaaiaa3J1FanJQQsv97baa2aRaaaaatUaGwfUBa1Lmdp'
+        - Name: WORDPRESS_LOGGED_IN_KEY
+          Value: 'a1aSaaaaybanZwYaaaaaalaRaSdjTHU0FM9OaaNAVIaaaaa6qaa1aajS2Uy2kaEq'
+        - Name: WORDPRESS_NONCE_KEY
+          Value: 'mC8aWvM3a5fadaHaGawsaQiBskaaaraaafPZJQdRaatvQtaOakaaaaQZEaNfafaa'
+        - Name: WORDPRESS_AUTH_SALT
+          Value: 'EaAwWaansaa3a3aa1LQrf2af5cLEaaZqabpG6K2adQaaaRJRaaaa8ACwaKYXaaV]'
+        - Name: WORDPRESS_SECURE_AUTH_SALT
+          Value: 'aauUa7GIpohbabBaza10GalaisfXDaJIa9m43aFCa90lhaxjg3aPaLnnaaaVQaoQ'
+        - Name: WORDPRESS_LOGGED_IN_SALT
+          Value: 'saK94aaaaaa4DyoayGAaaOaKaYQaOaKaXQCQWacpa3uabaqF?7sMaauOdaXaopL2'
+        - Name: WORDPRESS_NONCE_SALT
+          Value: 'qaVq8rOcahaagaaa9AaoRh7d7SYJka2irwatunaaavaaaH6aKa5IJXaJu4laaaq^'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      Volumes:
+      - Name: data
+        Host:
+          SourcePath: /mnt/wordpress_uat
+
+  ApplicationScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - application-autoscaling.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Ref AWS::StackName
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "application-autoscaling:*"
+                  - "cloudwatch:DescribeAlarms"
+                  - "cloudwatch:PutMetricAlarm"
+                  - "ecs:DescribeServices"
+                  - "ecs:UpdateService"
+                Resource: "*"
+
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['elasticloadbalancing:DeregisterInstancesFromLoadBalancer', 'elasticloadbalancing:DeregisterTargets',
+              'elasticloadbalancing:Describe*', 'elasticloadbalancing:RegisterInstancesWithLoadBalancer',
+              'elasticloadbalancing:RegisterTargets', 'ec2:Describe*', 'ec2:AuthorizeSecurityGroupIngress']
+            Resource: '*'
+
+  ProdWordpressService:
+    Type: AWS::ECS::Service
+    DependsOn: ECSALBListenerRuleProd
+    Properties:
+      Cluster: !Ref EcsCluster
+      LoadBalancers:
+      - ContainerName: wordpress
+        ContainerPort: '80'
+        TargetGroupArn: !Ref 'EcsTargetGroupProd'
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 50
+      TaskDefinition: !Ref ProdWordpressTaskDefinition
+      Role: !Ref 'ECSServiceRole'
+      DesiredCount: !Ref AsgMinSize
+
+  UatWordpressService:
+    Type: AWS::ECS::Service
+    DependsOn: ECSALBListenerRuleUat
+    Properties:
+      Cluster: !Ref EcsCluster
+      LoadBalancers:
+      - ContainerName: wordpress
+        ContainerPort: '80'
+        TargetGroupArn: !Ref 'EcsTargetGroupUat'
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 50
+      TaskDefinition: !Ref UatWordpressTaskDefinition
+      Role: !Ref 'ECSServiceRole'
+      DesiredCount: !Ref AsgMinSize
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Allowed Ports
+      VpcId: !Ref VpcId
+
+  EcsSecurityGroupHTTPinbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '80'
+      ToPort: '80'
+      CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroupHTTPSinbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '443'
+      ToPort: '443'
+      CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroupECSAllTrafficports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !Ref 'Sg'
+
+  EcsSecurityGroupALBAllTrafficports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !Ref 'EcsSecurityGroup'
+
+  ECSALBProd:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-wordpress-prod
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets:
+      - !Ref SubnetID1
+      - !Ref SubnetID2
+      SecurityGroups: [ !Ref EcsSecurityGroup ]
+
+  ECSALBUat:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-wordpress-uat
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets:
+      - !Ref SubnetID1
+      - !Ref SubnetID2
+      SecurityGroups: [ !Ref EcsSecurityGroup ]
+
+  ALBListenerProd:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'EcsTargetGroupProd'
+      LoadBalancerArn: !Ref 'ECSALBProd'
+      Port: '80'
+      Protocol: HTTP
+
+  ALBListenerUat:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'EcsTargetGroupUat'
+      LoadBalancerArn: !Ref 'ECSALBUat'
+      Port: '80'
+      Protocol: HTTP
+
+  ECSALBListenerRuleProd:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: ALBListenerProd
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'EcsTargetGroupProd'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'ALBListenerProd'
+      Priority: 1
+
+  ECSALBListenerRuleUat:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: ALBListenerUat
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'EcsTargetGroupUat'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'ALBListenerUat'
+      Priority: 1
+
+  EcsTargetGroupProd:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: ECSALBProd
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200,301,302,346'
+      Name:
+        Fn::Sub: ${AWS::StackName}-wordpress-prod
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VpcId
+
+  EcsTargetGroupUat:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: ECSALBUat
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200,302,346'
+      Name:
+        Fn::Sub: ${AWS::StackName}-wordpress-uat
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VpcId
+
+  ProdMySQLTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      NetworkMode: host
+      ContainerDefinitions:
+      - Name: mysql
+        Image: mysql:5.7
+        Memory: 256
+        PortMappings:
+        - ContainerPort: 3306
+        MountPoints:
+        - ContainerPath: /var/lib/mysql
+          SourceVolume: data
+        Environment:
+        - Name: MYSQL_RANDOM_ROOT_PASSWORD
+          Value: "yes"
+        - Name: MYSQL_DATABASE
+          Value: !Ref MYSQLDATABASE
+        - Name: MYSQL_USER
+          Value: !Ref MYSQLUSER
+        - Name: MYSQL_PASSWORD
+          Value: !Ref MYSQLPASSWORD
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      Volumes:
+      - Name: data
+        Host:
+          SourcePath: /mnt/mysql_prod
+
+  UatMySQLTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      NetworkMode: host
+      ContainerDefinitions:
+      - Name: mysql
+        Image: mysql:5.7
+        Memory: 256
+        PortMappings:
+        - ContainerPort: 3306
+        MountPoints:
+        - ContainerPath: /var/lib/mysql
+          SourceVolume: data
+        Environment:
+        - Name: MYSQL_RANDOM_ROOT_PASSWORD
+          Value: "yes"
+        - Name: MYSQL_DATABASE
+          Value: !Ref MYSQLDATABASE
+        - Name: MYSQL_USER
+          Value: !Ref MYSQLUSER
+        - Name: MYSQL_PASSWORD
+          Value: !Ref MYSQLPASSWORD
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      Volumes:
+      - Name: data
+        Host:
+          SourcePath: /mnt/mysql_uat
+
+  ECSELBMySQLProd:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName:
+        Fn::Sub: ${AWS::StackName}-mysql-prod
+      Subnets: 
+      - !Ref SubnetID1
+      - !Ref SubnetID2
+      SecurityGroups: [ !Ref EcsSecurityGroup ]
+      Scheme: internal
+      HealthCheck:
+        Target: TCP:3306
+        HealthyThreshold: '2'
+        UnhealthyThreshold: '10'
+        Interval: '30'
+        Timeout: '5'
+      Listeners:
+      - LoadBalancerPort: '3306'
+        InstancePort: '3306'
+        Protocol: TCP
+
+  ECSELBMySQLUat:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName:
+        Fn::Sub: ${AWS::StackName}-mysql-uat
+      Subnets: 
+      - !Ref SubnetID1
+      - !Ref SubnetID2
+      SecurityGroups: [ !Ref EcsSecurityGroup ]
+      Scheme: internal
+      HealthCheck:
+        Target: TCP:3306
+        HealthyThreshold: '2'
+        UnhealthyThreshold: '10'
+        Interval: '30'
+        Timeout: '5'
+      Listeners:
+      - LoadBalancerPort: '3306'
+        InstancePort: '3306'
+        Protocol: TCP
+
+  ServiceMySQLProd:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      LoadBalancers:
+      - ContainerName: mysql
+        ContainerPort: '3306'
+        LoadBalancerName: !Ref 'ECSELBMySQLProd'
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 50
+      TaskDefinition: !Ref ProdMySQLTaskDefinition
+      Role: !Ref 'ECSServiceRole'
+      DesiredCount: 1
+
+  ServiceMySQLUat:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      LoadBalancers:
+      - ContainerName: mysql
+        ContainerPort: '3306'
+        LoadBalancerName: !Ref 'ECSELBMySQLUat'
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 50
+      TaskDefinition: !Ref UatMySQLTaskDefinition
+      Role: !Ref 'ECSServiceRole'
+      DesiredCount: 1
+
+  MonitoringTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      NetworkMode: host
+      ContainerDefinitions:
+      - Name: node-exporter
+        Image:
+          Ref: NodeExporterImage
+        Memory: 256
+        PortMappings:
+        - ContainerPort: 9100
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      - Name: pcp
+        Image:
+          Ref: PcpImage
+        Memory: 256
+        Privileged: true
+        PortMappings:
+        - ContainerPort: 9990
+        MountPoints:
+        - ContainerPath: /var/lib/docker
+          SourceVolume: docker
+          ReadOnly: true
+        - ContainerPath: /sys
+          SourceVolume: sys
+          ReadOnly: true
+        - ContainerPath: /var/run
+          SourceVolume: run
+          ReadOnly: false
+        - ContainerPath: /rootfs
+          SourceVolume: rootfs
+          ReadOnly: true
+        - ContainerPath: /cgroup
+          SourceVolume: cgroup
+          ReadOnly: true
+        - ContainerPath: /etc/localtime
+          SourceVolume: localtime
+          ReadOnly: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      - Name: cadvisor
+        Image:
+          Ref: CadvisorImage
+        Memory: 256
+        Privileged: true
+        PortMappings:
+        - ContainerPort: 8080
+        MountPoints:
+        - ContainerPath: /var/lib/docker
+          SourceVolume: docker
+          ReadOnly: true
+        - ContainerPath: /sys
+          SourceVolume: sys
+          ReadOnly: true
+        - ContainerPath: /var/run
+          SourceVolume: run
+          ReadOnly: false
+        - ContainerPath: /rootfs
+          SourceVolume: rootfs
+          ReadOnly: true
+        - ContainerPath: /cgroup
+          SourceVolume: cgroup
+          ReadOnly: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix:
+              Ref: AWS::StackName
+      Volumes:
+      - Name: cgroup
+        Host:
+          SourcePath: /cgroup
+      - Name: docker
+        Host:
+          SourcePath: /var/lib/docker/
+      - Name: docker-sock
+        Host:
+          SourcePath: /var/run/docker.sock
+      - Name: run
+        Host:
+          SourcePath: /var/run
+      - Name: rootfs
+        Host:
+          SourcePath: /
+      - Name: sys
+        Host:
+          SourcePath: /sys
+      - Name: localtime
+        Host:
+          SourcePath: /etc/localtime
+
+  MonitoringService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster:
+        Ref: EcsCluster
+      TaskDefinition:
+        Ref: MonitoringTaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      DesiredCount:
+        Ref: AsgMinSize
+
+
+Outputs:
+
+  Asg:
+    Value:
+      Ref: Asg
+
+  EcsCluster:
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-EcsCluster
+    Value:
+      Ref: EcsCluster
+
+  WebsiteProd:
+    Description: WebSiteProd
+    Value: !Join ['', ['http://',!GetAtt [ECSALBProd, DNSName]]]
+
+  MySQLProd:
+    Description: MySQLProd
+    Value: !GetAtt ECSELBMySQLProd.DNSName
+
+  WebsiteUat:
+    Description: WebSiteUat
+    Value: !Join ['', ['http://',!GetAtt [ECSALBUat, DNSName]]]
+
+  MySQLUat:
+    Description: MySQLUat
+    Value: !GetAtt ECSELBMySQLUat.DNSName
