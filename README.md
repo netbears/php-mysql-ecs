@@ -2,7 +2,7 @@
 
 This is a method to deploy 2 environments (PROD and UAT) in ECS with MySQL and PHP containers, along with proper monitoring, logging, backup and data persistency.
 
-The CloudFormation template and explanation is also posted on the [NETBEARS](https://github.com/NETBEARS/php-mysql-EFS-ECS) company blog. You might want to check the website out for more tutorials like this.
+The CloudFormation template and explanation is also posted on the [NETBEARS](https://netbears.com/blog/php-mysql-ecs/) company blog. You might want to check the website out for more tutorials like this.
 
 ## Run the CloudFormation template with AWS CLI
 
